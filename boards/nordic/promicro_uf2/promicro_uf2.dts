@@ -161,11 +161,11 @@
 		reg = <0>;
 	};
 
-	mag: mag@0 {
-		compatible = "i2c-device";
-		label = "mag";
-		reg = <0>;
-	};
+//	mag: mag@0 {
+//		compatible = "i2c-device";
+//		label = "mag";
+//		reg = <0>;
+//	};
 
 };
 
