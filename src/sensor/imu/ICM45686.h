@@ -26,6 +26,7 @@
 #define ICM45686_GYRO_CONFIG0              0x1C
 
 #define ICM45686_FIFO_CONFIG0              0x1D
+#define ICM45686_FIFO_CONFIG1_0            0x1E
 #define ICM45686_FIFO_CONFIG3              0x21
 
 #define ICM45686_TMST_WOM_CONFIG           0x23
@@ -40,6 +41,14 @@
 #define ICM45686_IREG_DATA                 0x7E
 
 #define ICM45686_REG_MISC2                 0x7F
+
+// User Bank IPREG_BAR
+#define ICM45686_IPREG_BAR                 0xA0 // MSB
+
+#define ICM45686_IPREG_BAR_REG_58          0x3A
+#define ICM45686_IPREG_BAR_REG_59          0x3B
+#define ICM45686_IPREG_BAR_REG_60          0x3C
+#define ICM45686_IPREG_BAR_REG_61          0x3D
 
 // User Bank IPREG_TOP1
 #define ICM45686_IPREG_TOP1                0xA2 // MSB
@@ -148,6 +157,7 @@ void icm45_accel_read(float a[3]);
 void icm45_gyro_read(float g[3]);
 float icm45_temp_read(void);
 
+uint8_t icm45_setup_DRDY(uint16_t threshold);
 uint8_t icm45_setup_WOM(void);
 
 int icm45_ext_setup(void);

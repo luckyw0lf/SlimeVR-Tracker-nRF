@@ -24,12 +24,21 @@
 #include "util.h"
 #include "esb.h"
 #include "build_defines.h"
+#include "hid.h"
+
+#include <zephyr/kernel.h>
 
 static uint8_t tracker_id, batt, batt_v, sensor_temp, imu_id, mag_id, tracker_status;
 static uint8_t tracker_svr_status = SVR_STATUS_OK;
 static float sensor_q[4], sensor_a[3], sensor_m[3];
 
+static uint8_t data_buffer[16] = {0};
+static int64_t last_data_time = 0;
+
 LOG_MODULE_REGISTER(connection, LOG_LEVEL_INF);
+
+static void connection_thread(void);
+K_THREAD_DEFINE(connection_thread_id, 512, connection_thread, NULL, NULL, NULL, CONNECTION_THREAD_PRIORITY, K_FP_REGS, 0);
 
 void connection_clocks_request_start(void)
 {
@@ -67,15 +76,27 @@ void connection_update_sensor_ids(int imu, int mag)
 	mag_id = get_server_constant_mag_id(mag);
 }
 
-void connection_update_sensor_data(float *q, float *a)
+static int64_t quat_update_time = 0;
+static int64_t last_quat_time = 0;
+static bool send_precise_quat;
+
+void connection_update_sensor_data(float *q, float *a, int64_t data_time)
 {
+	// data_time is in system ticks, nonzero means valid measurement
+	// TODO: use data_time to measure latency! the latency should be calculated up to before radio sent data
+	send_precise_quat = q_epsilon(q, sensor_q, 0.005);
 	memcpy(sensor_q, q, sizeof(sensor_q));
 	memcpy(sensor_a, a, sizeof(sensor_a));
+	quat_update_time = k_uptime_get();
 }
+
+static int64_t mag_update_time = 0;
+static int64_t last_mag_time = 0;
 
 void connection_update_sensor_mag(float *m)
 {
 	memcpy(sensor_m, m, sizeof(sensor_m));
+	mag_update_time = k_uptime_get();
 }
 
 void connection_update_sensor_temp(float temp)
@@ -147,7 +168,10 @@ void connection_write_packet_0() // device info
 	data[13] = FW_VERSION_MINOR & 255; // fw_minor
 	data[14] = FW_VERSION_PATCH & 255; // fw_patch
 	data[15] = 0; // rssi (supplied by receiver)
-	esb_write(data);
+	memcpy(data_buffer, data, sizeof(data));
+	last_data_time = k_uptime_get(); // TODO: use ticks
+//	esb_write(data); // TODO: schedule in thread
+	hid_write_packet_n(data); // TODO:
 }
 
 void connection_write_packet_1() // full precision quat and accel
@@ -163,7 +187,10 @@ void connection_write_packet_1() // full precision quat and accel
 	buf[4] = TO_FIXED_7(sensor_a[0]); // range is ±256m/s² or ±26.1g 
 	buf[5] = TO_FIXED_7(sensor_a[1]);
 	buf[6] = TO_FIXED_7(sensor_a[2]);
-	esb_write(data);
+	memcpy(data_buffer, data, sizeof(data));
+	last_data_time = k_uptime_get(); // TODO: use ticks
+//	esb_write(data); // TODO: schedule in thread
+	hid_write_packet_n(data); // TODO:
 }
 
 void connection_write_packet_2() // reduced precision quat and accel with battery, temp, and rssi
@@ -195,7 +222,10 @@ void connection_write_packet_2() // reduced precision quat and accel with batter
 	buf[1] = TO_FIXED_7(sensor_a[1]);
 	buf[2] = TO_FIXED_7(sensor_a[2]);
 	data[15] = 0; // rssi (supplied by receiver)
-	esb_write(data);
+	memcpy(data_buffer, data, sizeof(data));
+	last_data_time = k_uptime_get(); // TODO: use ticks
+//	esb_write(data); // TODO: schedule in thread
+	hid_write_packet_n(data); // TODO:
 }
 
 void connection_write_packet_3() // status
@@ -206,7 +236,10 @@ void connection_write_packet_3() // status
 	data[2] = tracker_svr_status;
 	data[3] = tracker_status;
 	data[15] = 0; // rssi (supplied by receiver)
-	esb_write(data);
+	memcpy(data_buffer, data, sizeof(data));
+	last_data_time = k_uptime_get(); // TODO: use ticks
+//	esb_write(data); // TODO: schedule in thread
+	hid_write_packet_n(data); // TODO:
 }
 
 void connection_write_packet_4() // full precision quat and magnetometer
@@ -222,5 +255,76 @@ void connection_write_packet_4() // full precision quat and magnetometer
 	buf[4] = TO_FIXED_10(sensor_m[0]); // range is ±32G
 	buf[5] = TO_FIXED_10(sensor_m[1]);
 	buf[6] = TO_FIXED_10(sensor_m[2]);
-	esb_write(data);
+	memcpy(data_buffer, data, sizeof(data));
+	last_data_time = k_uptime_get(); // TODO: use ticks
+//	esb_write(data); // TODO: schedule in thread
+	hid_write_packet_n(data); // TODO:
+}
+
+// TODO: get radio channel from receiver
+// TODO: new packet format
+
+// TODO: use timing from IMU to get actual delay in tracking
+// TODO: aware of sensor state? error status, timing/phase, maybe "send_precise_quat"
+
+// TODO: queuing, status is lowest priority, info low priority, existing data highest priority (from sensor loop)
+
+// TODO: queue packets directly for HID, or maintain separate loop while connected by USB
+
+static int64_t last_info_time = 0;
+static int64_t last_status_time = 0;
+
+void connection_thread(void)
+{
+	// TODO: checking for connection_update events from sensor_loop, here we will time and send them out
+	while (1)
+	{
+		if (last_data_time != 0) // have valid data
+		{
+			last_data_time = 0;
+			esb_write(data_buffer);
+		}
+		// mag is higher priority (skip accel, quat is full precision)
+		else if (mag_update_time && k_uptime_get() - last_mag_time > 200)
+		{
+			mag_update_time = 0; // data has been sent
+			last_mag_time = k_uptime_get();
+			connection_write_packet_4();
+			continue;
+		}
+		// if time for info and precise quat not needed
+		else if (quat_update_time && !send_precise_quat && k_uptime_get() - last_info_time > 100)
+		{
+			quat_update_time = 0;
+			last_quat_time = k_uptime_get();
+			last_info_time = k_uptime_get();
+			connection_write_packet_2();
+			continue;
+		}
+		// send quat otherwise
+		else if (quat_update_time)
+		{
+			quat_update_time = 0;
+			last_quat_time = k_uptime_get();
+			connection_write_packet_1();
+			continue;
+		}
+		else if (k_uptime_get() - last_info_time > 100)
+		{
+			last_info_time = k_uptime_get();
+			connection_write_packet_0();
+			continue;
+		}
+		else if (k_uptime_get() - last_status_time > 1000)
+		{
+			last_status_time = k_uptime_get();
+			connection_write_packet_3();
+			continue;
+		}
+		else
+		{
+			connection_clocks_request_stop();
+		}
+		k_msleep(1); // TODO: should be getting timing from receiver, for now just send asap
+	}
 }
